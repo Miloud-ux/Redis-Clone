@@ -3,13 +3,21 @@
 ## Table of content
 
 <!--toc:start-->
-
-- [Notion on networking](#notion-on-networking)
+- [Simple Guide on Networking and Sockets](#simple-guide-on-networking-and-sockets)
+  - [Table of content](#table-of-content)
   - [TCP/IP Model](#tcpip-model)
     - [Ports](#ports)
     - [TCP vs UDP](#tcp-vs-udp)
-  - [Sockets](#sockets) - [Definition](#definition) - [Listening](#listening) - [Connection socket](#connection-socket)
-  <!--toc:end-->
+  - [Sockets](#sockets)
+    - [Definition](#definition)
+    - [Listening](#listening)
+    - [Connection socket](#connection-socket)
+    - [Socket options](#socket-options)
+    - [Sockaddr](#sockaddr)
+  - [Models of concurrency](#models-of-concurrency)
+  - [Thread-based & Proces-based concurrency](#thread-based-proces-based-concurrency)
+  - [Event loops](#event-loops)
+<!--toc:end-->
 
 ## TCP/IP Model
 
@@ -81,3 +89,35 @@ Looking at the socketAPI, sockaddr is like void type and it has no use really so
 struct sockaddr_in addr = {...}; // IPV4 socket
 bind(fd, (const struct sockaddr*)&addr, sizeof(addr));
 ```
+
+
+## Models of concurrency
+Then need for multi-threading comes from the fact that reads and writes syscalls wait for the recv/write kernel-side buffer (respectively)
+to either gather some data or empty up to be able to perfiorm the syscall. Read and Write syscalls are non-blocking because they simply
+cosume/append to the kernel-side buffer.
+
+## Thread-based & Proces-based concurrency
+Concurrency in this model is achieved by spawning a new thread per socket, this is insufficient to larger applications because threads consume
+more memory and causes OS overhead. This is even worse if you are forking the process per socket.
+
+## Event loops
+If there is a way to wait for multiple sockets at once, and then read/write whichever ones are ready, only a single thread is needed! 
+
+A pseudo-code should look like this:
+```Python
+while running:
+  want_read =  [...] # socket fds
+  want_write = [...] # socket fds
+  can_read, can_write = wait_for_readiness(want_read, want_write); # Blocks
+  for fd in can_read:
+    data = read(fd); # non blocking (consuming from buffer)
+    handle_data(data); # app logic without IO
+
+  for fd in can_write:
+    data = pending_data(fd) # produced by the application
+    n = write_nb(fd, data) # non-blocking, only append to the buffer
+    data_written(fd, n) # n <= len(data), limited by the available space since the write buffer in this stage could be partially free but not
+    necessarly fully empty, in contrast if it was the old blocking model we would wait for the buffer to empty fully.
+```
+
+
