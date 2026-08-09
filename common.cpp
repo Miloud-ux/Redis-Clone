@@ -12,9 +12,9 @@
 #include <unistd.h>
 #include <vector>
 
-static void buf_append(std::vector<uint8_t> buf, const uint8_t data, size_t len) { buf.insert(buf.end(), len, data); }
+static void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) { buf.insert(buf.end(), data, data + len); }
 
-static void buf_consume(std::vector<uint8_t> buf, size_t len) { buf.erase(buf.begin(), buf.begin() + len); }
+static void buf_consume(std::vector<uint8_t> &buf, size_t len) { buf.erase(buf.begin(), buf.begin() + len); }
 
 static void fd_set_nb(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
 void die(const char *err_msg) {
@@ -96,7 +96,7 @@ void handle_read(Conn *conn) {
     return;
   }
 
-  buff_append(conn->incoming, read_buf, (size_t)rv);
+  buf_append(conn->incoming, read_buf, (size_t)rv);
   try_one_request(conn);
 }
 
@@ -107,7 +107,7 @@ bool try_one_request(Conn *conn) {
   }
 
   uint32_t len = 0;
-  std::memcpy(&len, &conn->incoming, 4);
+  std::memcpy(&len, conn->incoming.data(), 4);
   if (len > k_max_msg) {
     conn->want_close = true;
     return false;
@@ -119,8 +119,8 @@ bool try_one_request(Conn *conn) {
 
   // generate the response (echo it back)
   uint8_t *request = &conn->incoming[4];
-  buf_append(conn->outgoing, *(const uint8_t *)&len, 4);
-  buf_consume(conn->outgoing, len);
+  buf_append(conn->outgoing, (const uint8_t *)&len, 4);
+  buf_append(conn->outgoing, request, len);
 
   // consume the message from incoming
   buf_consume(conn->incoming, len + 4);
