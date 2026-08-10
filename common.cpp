@@ -1,5 +1,6 @@
 #include "server.h"
 #include <assert.h>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -97,11 +98,19 @@ void handle_read(Conn *conn) {
   }
 
   buf_append(conn->incoming, read_buf, (size_t)rv);
-  try_one_request(conn);
+  /*  == Batch multiple requests ==
+   * this tiny change plays a huge role */
+  while (try_one_request(conn)) {
+  }
+
+  if (conn->outgoing.size() > 0) {
+    conn->want_read = false;
+    conn->want_write = true;
+    return handle_write(conn);
+  }
 }
 
 bool try_one_request(Conn *conn) {
-
   if (conn->incoming.size() < 4) {
     return false;
   }
@@ -124,5 +133,32 @@ bool try_one_request(Conn *conn) {
 
   // consume the message from incoming
   buf_consume(conn->incoming, len + 4);
+
+  /*  in request-response protocols you can either
+   *  write a request or read a response that's why
+   *  we change the state. Note that this is not always
+   *  the case and some protocols can read and write simultanously
+   */
+
   return true;
+}
+
+void handle_write(Conn *conn) {
+  assert(conn->outgoing.size() > 0);
+  ssize_t rv = write(conn->fd, conn->outgoing.data(), conn->outgoing.size());
+
+  if (rv < 0 && errno == EAGAIN) {
+    return; // full buffer
+  }
+
+  if (rv < 0) {
+    conn->want_close = true;
+    return;
+  }
+
+  buf_consume(conn->outgoing, rv);
+  if (conn->outgoing.size() == 0) {
+    conn->want_read = true;
+    conn->want_write = false;
+  }
 }

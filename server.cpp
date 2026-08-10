@@ -63,7 +63,7 @@ int main() {
     }
 
     // == Wait for readiness ==
-    int rv = poll(poll_args.data(), poll_args.size(), 0);
+    int rv = poll(poll_args.data(), poll_args.size(), -1);
     if (rv < 0 && errno == EINTR) {
       continue; // not an error
     }
