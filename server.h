@@ -1,8 +1,12 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
 #include <stddef.h>
 #include <stdint.h>
 #include <vector>
+
+// intrusive data structure
+#define container_of(ptr, T, member) ((T *)((char *)ptr - offsetof(T, member)))
 
 constexpr size_t k_max_msg = 32 << 20; // huge number
 struct Conn {

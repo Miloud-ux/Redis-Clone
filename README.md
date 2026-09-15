@@ -14,12 +14,14 @@ A Redis server and client built from scratch following the book "Build Your Own 
 
 - Single-threaded TCP server using an event loop built on `poll()`.
 - Non-blocking IO with buffered reads and writes.
-- Simple client for testing the server.
+- Handles pipelined requests (multiple messages per read).
+- Client for testing the server, including a 32 MB message stress test.
+- `common.cpp` is a shared module used by both the server and the client.
 
 ## Project Structure
 
 - `server.h`: shared declarations, `Conn` struct, common helpers.
-- `common.cpp`: implementations of the shared helpers and application callbacks.
+- `common.cpp`: shared implementations used by server and client.
 - `server.cpp`: event loop, socket setup, connection handling.
 - `client.cpp`: test client that speaks the request-response protocol.
 - `Makefile`: builds the server and client targets.
@@ -46,8 +48,8 @@ Run the client in another terminal:
 ./client
 ```
 
-The server listens on port 1234 and echoes back the messages it receives.
+The server listens on port 1234. It reads requests in an event loop and sends responses back in order.
 
 ## Protocol
 
-Each message is a 4-byte length prefix (little endian) followed by that many bytes of payload.
+Each message is a 4-byte length prefix (little endian) followed by that many bytes of payload. Multiple messages may arrive in a single read; the server buffers and parses them as a byte stream.

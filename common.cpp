@@ -13,9 +13,13 @@
 #include <unistd.h>
 #include <vector>
 
-static void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) { buf.insert(buf.end(), data, data + len); }
+static void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) {
+  buf.insert(buf.end(), data, data + len);
+}
 
-static void buf_consume(std::vector<uint8_t> &buf, size_t len) { buf.erase(buf.begin(), buf.begin() + len); }
+static void buf_consume(std::vector<uint8_t> &buf, size_t len) {
+  buf.erase(buf.begin(), buf.begin() + len);
+}
 
 static void fd_set_nb(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
 void die(const char *err_msg) {

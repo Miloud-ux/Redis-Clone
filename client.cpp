@@ -73,20 +73,6 @@ int main() {
     die("connect()");
   }
 
-  bool running = true;
-  // while (running) {
-  //   std::string msg;
-  //   std::getline(std::cin, msg);
-  //   if (msg == "quit") {
-  //     running = false;
-  //     break;
-  //   }
-
-  //   int32_t err = query(fd, msg.c_str());
-  //   if (err) {
-  //     running = false;
-  //   }
-  // }
   std::vector<std::string> query_list = {"hello1", "hello2", "hello3", std::string(k_max_msg, 'z'), "hello5"};
   for (std::string &s : query_list) {
     int32_t err = query(fd, s.c_str());
