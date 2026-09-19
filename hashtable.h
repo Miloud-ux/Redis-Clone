@@ -1,7 +1,9 @@
 
+#include "server.h"
 #include <cstdint>
 #include <stdlib.h>
 #include <string>
+#include <vector>
 
 // intrusive data structure
 #define container_of(ptr, T, member) ((T *)((char *)ptr - offsetof(T, member)))
@@ -39,3 +41,7 @@ HNode *hm_lookup(HMap *hmap, HNode *key, bool (*eq)(HNode *, HNode *));
 void hm_insert(HMap *hmap, HNode *node);
 HNode *hm_delete(HMap *hmap, HNode *node, bool (*eq)(HNode *, HNode *));
 void hm_help_rehashing(HMap *hmap);
+
+void do_del(std::vector<std::string> &cmd, Buffer &out);
+void do_set(std::vector<std::string> &cmd, Buffer &out);
+void do_get(std::vector<std::string> &cmd, Buffer &out);

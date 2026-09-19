@@ -9,11 +9,14 @@
 #include <netinet/in.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <string>
 #include <sys/socket.h>
 #include <unistd.h>
 #include <vector>
 
-static void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) {
+typedef enum { ERR_TOO_BIG } Error; // size matters
+
+void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) {
   buf.insert(buf.end(), data, data + len);
 }
 
@@ -114,6 +117,55 @@ void handle_read(Conn *conn) {
   }
 }
 
+/* Buffer helpers */
+
+static void buf_append_u8(Buffer &buf, uint8_t data) { buf.push_back(data); }
+
+static void buf_append_u32(Buffer &buf, uint32_t data) {
+  buf_append(buf, (const uint8_t *)&data, 4);
+}
+
+static void response_begin(Buffer &outoging, size_t *header_pos) {
+  *header_pos = outoging.size();
+  buf_append_u32(outoging, 0);
+}
+
+static size_t response_size(Buffer &buf, size_t header_pos) { return buf.size() - header_pos - 4; }
+
+static void out_err(Buffer &out, Error e, const char *str, size_t len) {
+  buf_append_u8(out, TAG_ERR);
+  buf_append_u8(out, e); // Err code
+  buf_append_u32(out, (uint32_t)len);
+  buf_append(out, (const uint8_t *)str, len);
+}
+
+static void respose_end(Buffer &outgoing, size_t header_pos) {
+  size_t msg_size = response_size(outgoing, header_pos);
+
+  if (msg_size > k_max_msg) {
+    /* truncate the response to avoid overflow */
+    outgoing.resize(header_pos + 4);
+    std::string err_msg = "response size is too big";
+    out_err(outgoing, ERR_TOO_BIG, err_msg.data(), err_msg.size());
+    msg_size = response_size(outgoing, header_pos);
+    return;
+  }
+
+  uint32_t len = (uint32_t)msg_size;
+  memcpy(&outgoing[header_pos], &len, 4);
+}
+
+static std::vector<std::string> stringify_request(uint8_t *request, size_t len) {
+  size_t i = 0;
+  std::vector<std::string> cmd;
+
+  while (i < len) {
+    // convert bytes into strings??
+  }
+}
+
+void do_request(std::vector<std::string> &cmd, Buffer &outgoing) {}
+
 bool try_one_request(Conn *conn) {
   if (conn->incoming.size() < 4) {
     return false;
@@ -131,9 +183,18 @@ bool try_one_request(Conn *conn) {
   }
 
   // generate the response (echo it back)
+  /* [4 BYTES: Len][Reqest...]
+   *                |
+   *                v                   */
   uint8_t *request = &conn->incoming[4];
-  buf_append(conn->outgoing, (const uint8_t *)&len, 4);
-  buf_append(conn->outgoing, request, len);
+
+  // buf_append(conn->outgoing, (const uint8_t *)&len, 4);
+  // buf_append(conn->outgoing, request, len);
+
+  size_t header_pos = 0;
+  response_begin(conn->outgoing, &header_pos);
+  do_request(cmd, conn->outgoing);
+  respose_end(conn->outgoing, header_pos);
 
   // consume the message from incoming
   buf_consume(conn->incoming, len + 4);

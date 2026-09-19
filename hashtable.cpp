@@ -1,13 +1,13 @@
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
-#include <functional>
 #include <vector>
 
 #include "hashtable.h"
-#include "server.h"
 
 const size_t k_max_load_factor = 8;
-const size_t k_rehashing_work = 128; // migrate 128 entries per rehash
+const size_t k_rehashing_work = 128; // migrate (at-most) 128 entries per rehash
 
 static struct {
   HMap db;
@@ -130,8 +130,32 @@ void hm_help_rehashing(HMap *hmap) {
   }
 }
 
+// append one byte
+static void buf_append_u8(Buffer &buf, uint8_t data) { buf.push_back(data); }
+
+static void buf_append_u32(Buffer &buf, uint32_t data) {
+  buf_append(buf, (const uint8_t *)&data, 4);
+}
+
+static void buf_append_i64(Buffer &buf, int64_t val) { buf.push_back(val); }
+
+static void out_str(Buffer &out, const char *str, size_t len) {
+  buf_append_u8(out, TAG_STR);
+  buf_append_u32(out, (uint32_t)len);
+  buf_append(out, (const uint8_t *)str, len);
+}
+static void out_nil(Buffer &out) { buf_append_u8(out, TAG_NIL); }
+static void out_int(Buffer &out, int val) {
+  buf_append_u8(out, TAG_INT);
+  buf_append_i64(out, val);
+}
+static void out_arr(Buffer &out, uint32_t n) {
+  buf_append_u8(out, TAG_ARR);
+  buf_append_u32(out, n);
+}
+
 // [hash(age)] -> 20
-// get age
+// GET age
 
 /* create a dummy entry
  * dummy->node = NULL; dummy->key = cmd[2]; dummy->val = 0;
@@ -141,7 +165,7 @@ void hm_help_rehashing(HMap *hmap) {
  * else return error
  */
 
-static void do_get(std::vector<std::string> &cmd, Response &out) {
+void do_get(std::vector<std::string> &cmd, Buffer &out) {
   LookupKey dummy = {};
   dummy.key.swap(cmd[2]);
 
@@ -149,11 +173,73 @@ static void do_get(std::vector<std::string> &cmd, Response &out) {
 
   HNode *target = hm_lookup(&g_data.db, &dummy.node, &key_eq);
   if (!target) {
-    out.status = RES_NX;
-    return;
+    // Entry not found
+    return out_nil(out);
   }
 
   const std::string &val = container_of(target, struct Entry, node)->value;
   assert(val.size() < k_max_msg);
-  out.data.assign(val.begin(), val.end());
+
+  return out_str(out, val.data(), val.size()); // Write string into buffer
+}
+
+static Entry *createEntry(std::string key, std::string value) {
+  Entry *n = new Entry;
+  n->value.swap(value);
+  n->key.swap(key);
+  n->node.hcode = str_hash((uint8_t *)n->key.data(), n->key.size());
+  n->node.next = nullptr; // 0 for null
+  return n;
+}
+
+// set "age" 5
+void do_set(std::vector<std::string> &cmd, Buffer &out) {
+  LookupKey dummy = {};
+
+  dummy.key.swap(cmd[1]);
+  dummy.node.hcode = str_hash((uint8_t *)dummy.key.data(), dummy.key.size());
+
+  HNode *target = hm_lookup(&g_data.db, &dummy.node, &key_eq);
+
+  std::string new_val = cmd[2];
+  if (!target) {
+    // key doesn't exist
+    Entry *newEntry = createEntry(dummy.key, new_val);
+    hm_insert(&g_data.db, &newEntry->node);
+    return out_nil(out);
+  } else {
+    // already exists: overwrite the older value
+    Entry *e = container_of(target, struct Entry, node);
+    e->value.swap(new_val);
+  }
+
+  return out_nil(out);
+}
+
+/* CMD = DEL key
+ * 1. target = get key
+ * 2. done_delete = false
+ * 3. if exists(target): hm_detach(target) && done_delete = true
+ * 4. if done_delete: write(out, 1) // deleted one item
+ *    else: write(out, 0)
+ */
+
+void do_del(std::vector<std::string> &cmd, Buffer &out) {
+  LookupKey dummy = {};
+  dummy.key.swap(cmd[1]);
+  dummy.node.hcode = str_hash((uint8_t *)dummy.key.data(), dummy.key.size());
+
+  HNode *target = hm_lookup(&g_data.db, &dummy.node, &key_eq);
+  bool done_delete = false;
+  if (target) {
+    HNode *del = hm_delete(&g_data.db, target, &entry_eq);
+    if (del) {
+      // deletion success
+      done_delete = true;
+    }
+    // handle deletion failed
+  }
+  //
+  // Node doesn't exist so we deleted 0 items
+  return out_int(out, done_delete ? 1 : 0);
 }
