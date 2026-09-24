@@ -14,10 +14,18 @@
 #include <unistd.h>
 #include <vector>
 
-typedef enum { ERR_TOO_BIG } Error; // size matters
-
-void buf_append(std::vector<uint8_t> &buf, const uint8_t *data, size_t len) {
+void buf_append(Buffer &buf, const uint8_t *data, size_t len) {
   buf.insert(buf.end(), data, data + len);
+}
+
+void buf_append_u8(Buffer &buf, uint8_t data) { buf.push_back(data); }
+
+void buf_append_u32(Buffer &buf, uint32_t data) {
+  buf_append(buf, (const uint8_t *)&data, 4);
+}
+
+void buf_append_i64(Buffer &buf, int64_t val) {
+  buf_append(buf, (const uint8_t *)&val, 8);
 }
 
 static void buf_consume(std::vector<uint8_t> &buf, size_t len) {
@@ -25,6 +33,7 @@ static void buf_consume(std::vector<uint8_t> &buf, size_t len) {
 }
 
 static void fd_set_nb(int fd) { fcntl(fd, F_SETFL, fcntl(fd, F_GETFL, 0) | O_NONBLOCK); }
+
 void die(const char *err_msg) {
   perror(err_msg);
   exit(EXIT_FAILURE);
@@ -43,13 +52,12 @@ int32_t read_full(int fd, char *buf, size_t n) {
     ssize_t rv = read(fd, buf, n);
     if (rv < 0) {
       if (errno == EINTR) {
-        continue; // interrupted by a sig before reading (retry)
+        continue;
       }
-      return -1; // error
+      return -1;
     }
-
     if (rv == 0) {
-      return -1; // Unexpected EOF (connection closed before reading anything)
+      return -1;
     }
     assert((size_t)rv <= n);
     n -= (size_t)rv;
@@ -73,10 +81,6 @@ int32_t write_full(int fd, char *buf, size_t n) {
 
 Conn *handle_accept(int fd) {
   Conn *conn = new Conn();
-  if (!conn) {
-    return NULL;
-  }
-
   struct sockaddr_in client_addr = {};
   socklen_t socket_len = sizeof(client_addr);
   int connfd = accept(fd, (struct sockaddr *)&client_addr, &socket_len);
@@ -85,31 +89,20 @@ Conn *handle_accept(int fd) {
   }
   fd_set_nb(connfd);
   conn->fd = connfd;
-  conn->want_read = true; // read the first request
+  conn->want_read = true;
   return conn;
 }
 
 void handle_read(Conn *conn) {
-  // 1. Do a non-blocking read
-  // 2. Accumilate data
-  // 3. Parse message if it's enough else do nothing
-  // 4. Process the parsed message
-  // 5. remove msg from Conn::incoming
-
-  uint8_t read_buf[64 * 1024]; // read buffer 64kb
+  uint8_t read_buf[64 * 1024];
   ssize_t rv = read(conn->fd, read_buf, sizeof(read_buf));
-
-  if (rv <= 0) { // Handle I/O error (rv < 0) or EOF(rv == 0)
+  if (rv <= 0) {
     conn->want_close = true;
     return;
   }
-
   buf_append(conn->incoming, read_buf, (size_t)rv);
-  /*  == Batch multiple requests ==
-   * this tiny change plays a huge role */
   while (try_one_request(conn)) {
   }
-
   if (conn->outgoing.size() > 0) {
     conn->want_read = false;
     conn->want_write = true;
@@ -117,110 +110,133 @@ void handle_read(Conn *conn) {
   }
 }
 
-/* Buffer helpers */
-
-static void buf_append_u8(Buffer &buf, uint8_t data) { buf.push_back(data); }
-
-static void buf_append_u32(Buffer &buf, uint32_t data) {
-  buf_append(buf, (const uint8_t *)&data, 4);
+static bool read_u32(const uint8_t *&cur, const uint8_t *end, uint32_t &out) {
+  if (cur + 4 > end) {
+    return false;
+  }
+  memcpy(&out, cur, 4);
+  cur += 4;
+  return true;
 }
 
-static void response_begin(Buffer &outoging, size_t *header_pos) {
-  *header_pos = outoging.size();
-  buf_append_u32(outoging, 0);
+static bool read_str(const uint8_t *&cur, const uint8_t *end, size_t n, std::string &out) {
+  if (cur + n > end) {
+    return false;
+  }
+  out.assign(cur, cur + n);
+  cur += n;
+  return true;
 }
 
-static size_t response_size(Buffer &buf, size_t header_pos) { return buf.size() - header_pos - 4; }
+static int32_t parse_req(const uint8_t *data, size_t size, std::vector<std::string> &out) {
+  const uint8_t *end = data + size;
+  uint32_t nstr = 0;
+  if (!read_u32(data, end, nstr)) {
+    return -1;
+  }
+  if (nstr > k_max_args) {
+    return -1;
+  }
+  while (out.size() < nstr) {
+    uint32_t len = 0;
+    if (!read_u32(data, end, len)) {
+      return -1;
+    }
+    out.push_back(std::string());
+    if (!read_str(data, end, len, out.back())) {
+      return -1;
+    }
+  }
+  if (data != end) {
+    return -1;
+  }
+  return 0;
+}
 
-static void out_err(Buffer &out, Error e, const char *str, size_t len) {
-  buf_append_u8(out, TAG_ERR);
-  buf_append_u8(out, e); // Err code
+void out_nil(Buffer &out) { buf_append_u8(out, TAG_NIL); }
+
+void out_str(Buffer &out, const char *str, size_t len) {
+  buf_append_u8(out, TAG_STR);
   buf_append_u32(out, (uint32_t)len);
   buf_append(out, (const uint8_t *)str, len);
 }
 
-static void respose_end(Buffer &outgoing, size_t header_pos) {
-  size_t msg_size = response_size(outgoing, header_pos);
+void out_int(Buffer &out, int64_t val) {
+  buf_append_u8(out, TAG_INT);
+  buf_append_i64(out, val);
+}
 
+void out_arr(Buffer &out, uint32_t n) {
+  buf_append_u8(out, TAG_ARR);
+  buf_append_u32(out, n);
+}
+
+void out_err(Buffer &out, uint32_t code, const char *msg, size_t len) {
+  buf_append_u8(out, TAG_ERR);
+  buf_append_u32(out, code);
+  buf_append_u32(out, (uint32_t)len);
+  buf_append(out, (const uint8_t *)msg, len);
+}
+
+void response_begin(Buffer &out, size_t *header) {
+  *header = out.size();
+  buf_append_u32(out, 0);
+}
+
+static size_t response_size(Buffer &out, size_t header) { return out.size() - header - 4; }
+
+void response_end(Buffer &out, size_t header) {
+  size_t msg_size = response_size(out, header);
   if (msg_size > k_max_msg) {
-    /* truncate the response to avoid overflow */
-    outgoing.resize(header_pos + 4);
-    std::string err_msg = "response size is too big";
-    out_err(outgoing, ERR_TOO_BIG, err_msg.data(), err_msg.size());
-    msg_size = response_size(outgoing, header_pos);
-    return;
+    out.resize(header + 4);
+    const char *err_msg = "response size is too big";
+    out_err(out, ERR_TOO_BIG, err_msg, strlen(err_msg));
+    msg_size = response_size(out, header);
   }
-
   uint32_t len = (uint32_t)msg_size;
-  memcpy(&outgoing[header_pos], &len, 4);
+  memcpy(&out[header], &len, 4);
 }
-
-static std::vector<std::string> stringify_request(uint8_t *request, size_t len) {
-  size_t i = 0;
-  std::vector<std::string> cmd;
-
-  while (i < len) {
-    // convert bytes into strings??
-  }
-}
-
-void do_request(std::vector<std::string> &cmd, Buffer &outgoing) {}
 
 bool try_one_request(Conn *conn) {
   if (conn->incoming.size() < 4) {
     return false;
   }
-
   uint32_t len = 0;
   std::memcpy(&len, conn->incoming.data(), 4);
   if (len > k_max_msg) {
     conn->want_close = true;
     return false;
   }
-
   if (len + 4 > conn->incoming.size()) {
     return false;
   }
 
-  // generate the response (echo it back)
-  /* [4 BYTES: Len][Reqest...]
-   *                |
-   *                v                   */
-  uint8_t *request = &conn->incoming[4];
-
-  // buf_append(conn->outgoing, (const uint8_t *)&len, 4);
-  // buf_append(conn->outgoing, request, len);
+  const uint8_t *request = &conn->incoming[4];
+  std::vector<std::string> cmd;
+  if (parse_req(request, len, cmd) < 0) {
+    conn->want_close = true;
+    return false;
+  }
 
   size_t header_pos = 0;
   response_begin(conn->outgoing, &header_pos);
   do_request(cmd, conn->outgoing);
-  respose_end(conn->outgoing, header_pos);
+  response_end(conn->outgoing, header_pos);
 
-  // consume the message from incoming
-  buf_consume(conn->incoming, len + 4);
-
-  /*  in request-response protocols you can either
-   *  write a request or read a response that's why
-   *  we change the state. Note that this is not always
-   *  the case and some protocols can read and write simultanously
-   */
-
+  buf_consume(conn->incoming, 4 + len);
   return true;
 }
 
 void handle_write(Conn *conn) {
   assert(conn->outgoing.size() > 0);
   ssize_t rv = write(conn->fd, conn->outgoing.data(), conn->outgoing.size());
-
   if (rv < 0 && errno == EAGAIN) {
-    return; // full buffer
+    return;
   }
-
   if (rv < 0) {
     conn->want_close = true;
     return;
   }
-
   buf_consume(conn->outgoing, rv);
   if (conn->outgoing.size() == 0) {
     conn->want_read = true;

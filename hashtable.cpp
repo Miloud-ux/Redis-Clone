@@ -1,13 +1,16 @@
-#include <cassert>
+#include <assert.h>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
-#include <vector>
+#include <string>
+
+#include <openssl/sha.h>
 
 #include "hashtable.h"
+#include "server.h"
 
 const size_t k_max_load_factor = 8;
-const size_t k_rehashing_work = 128; // migrate (at-most) 128 entries per rehash
+const size_t k_rehashing_work = 128;
 
 static struct {
   HMap db;
@@ -20,25 +23,17 @@ static void h_init(HTab *t, size_t n) {
   t->mask = n - 1;
 }
 
-static bool entry_eq(HNode *n1, HNode *n2) {
-  Entry *en1 = container_of(n1, struct Entry, node);
-  Entry *en2 = container_of(n2, struct Entry, node);
-  return en1->key == en2->key;
+static bool entry_eq(HNode *lhs, HNode *rhs) {
+  Entry *le = container_of(lhs, Entry, node);
+  Entry *re = container_of(rhs, Entry, node);
+  return le->key == re->key;
 }
 
-static bool key_eq(HNode *n1, HNode *n2) {
-  LookupKey *k1 = container_of(n1, LookupKey, node);
-  LookupKey *k2 = container_of(n2, LookupKey, node);
-  return k1 == k2;
-}
-
-// We don't allocate in the data structure code since it's intrusive
 static void h_insert(HTab *t, HNode *n) {
   size_t pos = n->hcode & t->mask;
   n->next = t->tab[pos];
   t->tab[pos] = n;
   t->size++;
-  // TODO: log insertion or something
 }
 
 static HNode **h_lookup(HTab *t, HNode *key, bool (*eq)(HNode *, HNode *)) {
@@ -48,13 +43,11 @@ static HNode **h_lookup(HTab *t, HNode *key, bool (*eq)(HNode *, HNode *)) {
 
   size_t pos = key->hcode & t->mask;
   HNode **from = &t->tab[pos];
-
-  for (HNode *curr; (curr = *from) != NULL; from = &curr->next) {
-    if (curr->hcode == key->hcode && eq(key, curr)) {
-      return from; // return parent pointer for deletion
+  for (HNode *cur; (cur = *from) != NULL; from = &cur->next) {
+    if (cur->hcode == key->hcode && eq(key, cur)) {
+      return from;
     }
   }
-
   return NULL;
 }
 
@@ -65,10 +58,33 @@ static HNode *h_detach(HTab *t, HNode **from) {
   return node;
 }
 
-static void hm_trigger_rehashing(HMap *m) {
-  m->older = m->newer;
-  h_init(&m->newer, (m->older.mask + 1) * 2);
-  m->migrate_pos = 0;
+static void hm_trigger_rehashing(HMap *hmap) {
+  hmap->older = hmap->newer;
+  h_init(&hmap->newer, (hmap->older.mask + 1) * 2);
+  hmap->migrate_pos = 0;
+}
+
+static size_t hm_size(HMap *hmap) { return hmap->newer.size + hmap->older.size; }
+
+static void hm_foreach(HMap *hmap, bool (*cb)(HNode *, void *), void *arg) {
+  if (hmap->newer.tab) {
+    for (size_t i = 0; i <= hmap->newer.mask; i++) {
+      for (HNode *node = hmap->newer.tab[i]; node; node = node->next) {
+        if (!cb(node, arg)) {
+          return;
+        }
+      }
+    }
+  }
+  if (hmap->older.tab) {
+    for (size_t i = 0; i <= hmap->older.mask; i++) {
+      for (HNode *node = hmap->older.tab[i]; node; node = node->next) {
+        if (!cb(node, arg)) {
+          return;
+        }
+      }
+    }
+  }
 }
 
 HNode *hm_lookup(HMap *hmap, HNode *key, bool (*eq)(HNode *, HNode *)) {
@@ -77,7 +93,6 @@ HNode *hm_lookup(HMap *hmap, HNode *key, bool (*eq)(HNode *, HNode *)) {
   if (!from) {
     from = h_lookup(&hmap->older, key, eq);
   }
-
   return from ? *from : NULL;
 }
 
@@ -96,31 +111,27 @@ void hm_insert(HMap *hmap, HNode *node) {
   if (!hmap->newer.tab) {
     h_init(&hmap->newer, 4);
   }
-
   h_insert(&hmap->newer, node);
 
-  if (!hmap->older.tab) // if we are not during a rehash
-  {
-    size_t threshhold = (hmap->newer.mask + 1) * k_max_load_factor;
-    if (hmap->newer.size >= threshhold) {
+  if (!hmap->older.tab) {
+    size_t threshold = (hmap->newer.mask + 1) * k_max_load_factor;
+    if (hmap->newer.size >= threshold) {
       hm_trigger_rehashing(hmap);
     }
   }
-
-  hm_help_rehashing(hmap); // migrate some keys
+  hm_help_rehashing(hmap);
 }
 
 void hm_help_rehashing(HMap *hmap) {
   size_t nwork = 0;
-
   while (nwork < k_rehashing_work && hmap->older.size > 0) {
     HNode **from = &hmap->older.tab[hmap->migrate_pos];
     if (!*from) {
       hmap->migrate_pos++;
       continue;
     }
-
-    h_insert(&hmap->newer, h_detach(&hmap->older, from));
+    HNode *node = h_detach(&hmap->older, from);
+    h_insert(&hmap->newer, node);
     nwork++;
   }
 
@@ -130,116 +141,89 @@ void hm_help_rehashing(HMap *hmap) {
   }
 }
 
-// append one byte
-static void buf_append_u8(Buffer &buf, uint8_t data) { buf.push_back(data); }
-
-static void buf_append_u32(Buffer &buf, uint32_t data) {
-  buf_append(buf, (const uint8_t *)&data, 4);
+uint64_t str_hash(const uint8_t *data, size_t len) {
+  unsigned char digest[SHA256_DIGEST_LENGTH];
+  SHA256(data, len, digest);
+  uint64_t res = 0;
+  for (size_t i = 0; i < 8; i++) {
+    res = (res << 8) | digest[i];
+  }
+  return res;
 }
 
-static void buf_append_i64(Buffer &buf, int64_t val) { buf.push_back(val); }
+static void do_get(std::vector<std::string> &cmd, Buffer &out) {
+  Entry key;
+  key.key.swap(cmd[1]);
+  key.node.hcode = str_hash((const uint8_t *)key.key.data(), key.key.size());
 
-static void out_str(Buffer &out, const char *str, size_t len) {
-  buf_append_u8(out, TAG_STR);
-  buf_append_u32(out, (uint32_t)len);
-  buf_append(out, (const uint8_t *)str, len);
-}
-static void out_nil(Buffer &out) { buf_append_u8(out, TAG_NIL); }
-static void out_int(Buffer &out, int val) {
-  buf_append_u8(out, TAG_INT);
-  buf_append_i64(out, val);
-}
-static void out_arr(Buffer &out, uint32_t n) {
-  buf_append_u8(out, TAG_ARR);
-  buf_append_u32(out, n);
-}
-
-// [hash(age)] -> 20
-// GET age
-
-/* create a dummy entry
- * dummy->node = NULL; dummy->key = cmd[2]; dummy->val = 0;
- * dummyHnode = {}; dummyHnode->key = hash(cmd[2])
- * target = lookup(hmap, dummy);
- * if(target != NULL) we found it so we return val
- * else return error
- */
-
-void do_get(std::vector<std::string> &cmd, Buffer &out) {
-  LookupKey dummy = {};
-  dummy.key.swap(cmd[2]);
-
-  dummy.node.hcode = str_hash((uint8_t *)dummy.key.data(), dummy.key.size());
-
-  HNode *target = hm_lookup(&g_data.db, &dummy.node, &key_eq);
-  if (!target) {
-    // Entry not found
+  HNode *node = hm_lookup(&g_data.db, &key.node, &entry_eq);
+  if (!node) {
     return out_nil(out);
   }
 
-  const std::string &val = container_of(target, struct Entry, node)->value;
-  assert(val.size() < k_max_msg);
-
-  return out_str(out, val.data(), val.size()); // Write string into buffer
+  const std::string &val = container_of(node, Entry, node)->value;
+  assert(val.size() <= k_max_msg);
+  return out_str(out, val.data(), val.size());
 }
 
-static Entry *createEntry(std::string key, std::string value) {
-  Entry *n = new Entry;
-  n->value.swap(value);
-  n->key.swap(key);
-  n->node.hcode = str_hash((uint8_t *)n->key.data(), n->key.size());
-  n->node.next = nullptr; // 0 for null
-  return n;
-}
+static void do_set(std::vector<std::string> &cmd, Buffer &out) {
+  Entry key;
+  key.key.swap(cmd[1]);
+  key.node.hcode = str_hash((const uint8_t *)key.key.data(), key.key.size());
 
-// set "age" 5
-void do_set(std::vector<std::string> &cmd, Buffer &out) {
-  LookupKey dummy = {};
-
-  dummy.key.swap(cmd[1]);
-  dummy.node.hcode = str_hash((uint8_t *)dummy.key.data(), dummy.key.size());
-
-  HNode *target = hm_lookup(&g_data.db, &dummy.node, &key_eq);
-
-  std::string new_val = cmd[2];
-  if (!target) {
-    // key doesn't exist
-    Entry *newEntry = createEntry(dummy.key, new_val);
-    hm_insert(&g_data.db, &newEntry->node);
-    return out_nil(out);
+  HNode *node = hm_lookup(&g_data.db, &key.node, &entry_eq);
+  if (node) {
+    container_of(node, Entry, node)->value.swap(cmd[2]);
   } else {
-    // already exists: overwrite the older value
-    Entry *e = container_of(target, struct Entry, node);
-    e->value.swap(new_val);
+    Entry *entry = new Entry();
+    entry->key.swap(key.key);
+    entry->value.swap(cmd[2]);
+    entry->node.hcode = str_hash((const uint8_t *)entry->key.data(), entry->key.size());
+    hm_insert(&g_data.db, &entry->node);
   }
-
   return out_nil(out);
 }
 
-/* CMD = DEL key
- * 1. target = get key
- * 2. done_delete = false
- * 3. if exists(target): hm_detach(target) && done_delete = true
- * 4. if done_delete: write(out, 1) // deleted one item
- *    else: write(out, 0)
- */
+static void do_del(std::vector<std::string> &cmd, Buffer &out) {
+  Entry key;
+  key.key.swap(cmd[1]);
+  key.node.hcode = str_hash((const uint8_t *)key.key.data(), key.key.size());
 
-void do_del(std::vector<std::string> &cmd, Buffer &out) {
-  LookupKey dummy = {};
-  dummy.key.swap(cmd[1]);
-  dummy.node.hcode = str_hash((uint8_t *)dummy.key.data(), dummy.key.size());
-
-  HNode *target = hm_lookup(&g_data.db, &dummy.node, &key_eq);
-  bool done_delete = false;
-  if (target) {
-    HNode *del = hm_delete(&g_data.db, target, &entry_eq);
-    if (del) {
-      // deletion success
-      done_delete = true;
-    }
-    // handle deletion failed
+  HNode *node = hm_delete(&g_data.db, &key.node, &entry_eq);
+  if (node) {
+    delete container_of(node, Entry, node);
   }
-  //
-  // Node doesn't exist so we deleted 0 items
-  return out_int(out, done_delete ? 1 : 0);
+  return out_int(out, node ? 1 : 0);
+}
+
+static bool cb_keys(HNode *node, void *arg) {
+  Buffer &out = *(Buffer *)arg;
+  const std::string &key = container_of(node, Entry, node)->key;
+  out_str(out, key.data(), key.size());
+  return true;
+}
+
+static void do_keys(std::vector<std::string> &, Buffer &out) {
+  out_arr(out, (uint32_t)hm_size(&g_data.db));
+  hm_foreach(&g_data.db, cb_keys, &out);
+}
+
+static void do_dbsize(std::vector<std::string> &, Buffer &out) {
+  out_int(out, (int64_t)hm_size(&g_data.db));
+}
+
+void do_request(std::vector<std::string> &cmd, Buffer &out) {
+  if (cmd.size() == 2 && cmd[0] == "get") {
+    do_get(cmd, out);
+  } else if (cmd.size() == 3 && cmd[0] == "set") {
+    do_set(cmd, out);
+  } else if (cmd.size() == 2 && cmd[0] == "del") {
+    do_del(cmd, out);
+  } else if (cmd.size() == 1 && cmd[0] == "keys") {
+    do_keys(cmd, out);
+  } else if (cmd.size() == 1 && cmd[0] == "dbsize") {
+    do_dbsize(cmd, out);
+  } else {
+    out_err(out, ERR_UNKNOWN, "unknown cmd", sizeof("unknown cmd") - 1);
+  }
 }

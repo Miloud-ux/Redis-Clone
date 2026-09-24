@@ -3,14 +3,13 @@ CXXFLAGS = -Wall -Wextra -g
 
 all: server client
 
-server: server.cpp common.cpp server.h
-	$(CXX) $(CXXFLAGS) -o server server.cpp common.cpp
+server: server.cpp common.cpp hashtable.o server.h
+	$(CXX) $(CXXFLAGS) -o server server.cpp common.cpp hashtable.o -lcrypto
 
-client: client.cpp common.cpp server.h
-	$(CXX) $(CXXFLAGS) -o client client.cpp common.cpp
+client: client.cpp common.cpp hashtable.o server.h
+	$(CXX) $(CXXFLAGS) -o client client.cpp common.cpp hashtable.o -lcrypto
 
-# library with no main() yet; built as an object to link into the server later
-hashtable.o: hashtable.cpp hashtable.h
+hashtable.o: hashtable.cpp hashtable.h server.h
 	$(CXX) $(CXXFLAGS) -c hashtable.cpp -o hashtable.o
 
 clean:
