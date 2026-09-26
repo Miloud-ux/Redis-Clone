@@ -17,7 +17,7 @@ A Redis server and client built from scratch.
 - Non-blocking IO with buffered reads and writes.
 - Handles pipelined requests (multiple messages per read).
 - **Custom Hashtable**: In-memory key-value store with incremental rehashing and collision handling.
-- **KV Commands**: Supports basic `GET`, `SET`, and `DEL` operations.
+- **KV Commands**: Supports `GET`, `SET`, `DEL`, `KEYS`, and `DBSIZE`.
 - **TLV Serialization**: Client-server communication uses Type-Length-Value encoding.
 - Client for testing the server, including a 32 MB message stress test.
 
@@ -31,6 +31,14 @@ A Redis server and client built from scratch.
 - `Makefile`: builds the server and client targets.
 
 ## Build
+
+Prerequisites:
+
+```sh
+sudo apt install g++ libssl-dev
+```
+
+Then build:
 
 ```sh
 make
@@ -53,6 +61,8 @@ Run the client in another terminal:
 ```
 
 The server listens on port 1234. It reads requests in an event loop and sends responses back in order.
+
+> **Note**: `./client` only runs a pre-written test sequence (set/get/dbsize/keys/del) against the server. It is not an interactive shell yet. If you want to try other commands, connect with `telnet localhost 1234` and send your own message serialized with the protocol below — a proper interactive client will be implemented later.
 
 ## Protocol & Features
 
