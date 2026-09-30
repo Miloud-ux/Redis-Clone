@@ -1,4 +1,4 @@
-# Redis Clone
+# Redis style key-value in-memory db
 
 A Redis server and client built from scratch.
 
